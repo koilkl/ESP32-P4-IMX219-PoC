@@ -22,8 +22,15 @@
 
 #include "model_settings.h"
 #include "person_detect_model_data.h"
+#if __has_include("tensorflow/lite/micro/micro_error_reporter.h")
 #include "tensorflow/lite/micro/micro_error_reporter.h"
+#elif __has_include("tensorflow/lite/micro/tflite_bridge/micro_error_reporter.h")
+#include "tensorflow/lite/micro/tflite_bridge/micro_error_reporter.h"
+#else
+#error "micro_error_reporter header not found"
+#endif
 #include "tensorflow/lite/micro/micro_interpreter.h"
+#include "tensorflow/lite/micro/micro_log.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "tensorflow/lite/micro/system_setup.h"
 #include "tensorflow/lite/schema/schema_generated.h"
@@ -275,7 +282,7 @@ void setup() {
     }
 
     static tflite::MicroInterpreter static_interpreter(
-        s_model, micro_op_resolver, s_tensor_arena, s_tensor_arena_size, s_error_reporter);
+        s_model, micro_op_resolver, s_tensor_arena, s_tensor_arena_size);
     s_interpreter = &static_interpreter;
     if (s_interpreter->AllocateTensors() != kTfLiteOk) {
         TF_LITE_REPORT_ERROR(s_error_reporter, "AllocateTensors failed");
