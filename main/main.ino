@@ -1,8 +1,12 @@
 #include <Arduino.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 #include <sys/mman.h>
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "imx219.h"
 #include "esp_video_init.h"
 #include "esp_video_ioctl.h"
@@ -15,6 +19,14 @@
 #include "esp_timer.h"
 #include "nvs_flash.h"
 #include "jpeg_enc.h"
+
+#include "model_settings.h"
+#include "person_detect_model_data.h"
+#include "tensorflow/lite/micro/micro_error_reporter.h"
+#include "tensorflow/lite/micro/micro_interpreter.h"
+#include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
+#include "tensorflow/lite/micro/system_setup.h"
+#include "tensorflow/lite/schema/schema_generated.h"
 
 static const char *TAG = "app_main";
 
@@ -40,6 +52,15 @@ static uint64_t last_time = 0;
 static uint64_t last_frame_send = 0;
 static uint32_t frame_count = 0;
 static uint32_t sent_count = 0;
+
+namespace {
+tflite::ErrorReporter* s_error_reporter = nullptr;
+const tflite::Model* s_model = nullptr;
+tflite::MicroInterpreter* s_interpreter = nullptr;
+TfLiteTensor* s_input = nullptr;
+uint8_t* s_tensor_arena = nullptr;
+size_t s_tensor_arena_size = 160 * 1024;
+}
 
 #define FRAME_INTERVAL_US 100000  // 10 FPS = 100ms per frame
 
@@ -120,6 +141,45 @@ static void rgb_to_gray(const uint8_t *rgb, uint8_t *gray, int pixel_count) {
 
 const uint8_t syncHeader[] = {0xAA, 0x55, 0xAA};
 
+static TfLiteStatus GetImage(tflite::ErrorReporter* error_reporter, int image_width, int image_height, int channels, int8_t* image_data) {
+    if (image_width != OUT_WIDTH || image_height != OUT_HEIGHT || channels != 1) {
+        TF_LITE_REPORT_ERROR(error_reporter, "GetImage expects %dx%dx1, got %dx%dx%d", OUT_WIDTH, OUT_HEIGHT, image_width, image_height, channels);
+        return kTfLiteError;
+    }
+    if (fd < 0 || rgb_buf == NULL || gray_buf == NULL) {
+        TF_LITE_REPORT_ERROR(error_reporter, "Camera not initialized");
+        return kTfLiteError;
+    }
+
+    struct v4l2_buffer buf_dq;
+    memset(&buf_dq, 0, sizeof(buf_dq));
+    buf_dq.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    buf_dq.memory = V4L2_MEMORY_MMAP;
+    if (ioctl(fd, VIDIOC_DQBUF, &buf_dq) != 0) {
+        TF_LITE_REPORT_ERROR(error_reporter, "VIDIOC_DQBUF failed: %d (%s)", errno, strerror(errno));
+        return kTfLiteError;
+    }
+    if (buf_dq.index >= 2 || mapped_bufs[buf_dq.index] == NULL) {
+        TF_LITE_REPORT_ERROR(error_reporter, "Invalid buffer index: %d", (int)buf_dq.index);
+        ioctl(fd, VIDIOC_QBUF, &buf_dq);
+        return kTfLiteError;
+    }
+
+    uint8_t *raw_data = (uint8_t *)mapped_bufs[buf_dq.index];
+    demosaic_bggr_to_rgb(raw_data, rgb_buf, IMG_WIDTH, IMG_HEIGHT);
+    rgb_to_gray(rgb_buf, gray_buf, OUT_WIDTH * OUT_HEIGHT);
+    for (int i = 0; i < OUT_WIDTH * OUT_HEIGHT; i++) {
+        image_data[i] = (int8_t)((int)gray_buf[i] - 128);
+    }
+
+    if (ioctl(fd, VIDIOC_QBUF, &buf_dq) != 0) {
+        TF_LITE_REPORT_ERROR(error_reporter, "VIDIOC_QBUF failed: %d (%s)", errno, strerror(errno));
+        return kTfLiteError;
+    }
+
+    return kTfLiteOk;
+}
+
 void setup() {
     Serial0.begin(921600);
     delay(100);
@@ -186,10 +246,46 @@ void setup() {
     last_time = esp_timer_get_time();
     ESP_LOGI(TAG, "Camera setup complete. Sending 96x96 grayscale images...");
     ESP_LOGI(TAG, "rgb_buf=%p, gray_buf=%p", rgb_buf, gray_buf);
+
+    static tflite::MicroErrorReporter micro_error_reporter;
+    s_error_reporter = &micro_error_reporter;
+    tflite::InitializeTarget();
+
+    s_model = tflite::GetModel(g_person_detect_model_data);
+    if (s_model->version() != TFLITE_SCHEMA_VERSION) {
+        TF_LITE_REPORT_ERROR(s_error_reporter, "Model schema %d != %d", (int)s_model->version(), (int)TFLITE_SCHEMA_VERSION);
+        return;
+    }
+
+    static tflite::MicroMutableOpResolver<6> micro_op_resolver;
+    micro_op_resolver.AddAveragePool2D();
+    micro_op_resolver.AddConv2D();
+    micro_op_resolver.AddDepthwiseConv2D();
+    micro_op_resolver.AddReshape();
+    micro_op_resolver.AddSoftmax();
+    micro_op_resolver.AddFullyConnected();
+
+    s_tensor_arena = (uint8_t *)heap_caps_malloc(s_tensor_arena_size, MALLOC_CAP_SPIRAM);
+    if (!s_tensor_arena) {
+        s_tensor_arena = (uint8_t *)heap_caps_malloc(s_tensor_arena_size, MALLOC_CAP_INTERNAL);
+    }
+    if (!s_tensor_arena) {
+        TF_LITE_REPORT_ERROR(s_error_reporter, "Failed to allocate tensor arena");
+        return;
+    }
+
+    static tflite::MicroInterpreter static_interpreter(
+        s_model, micro_op_resolver, s_tensor_arena, s_tensor_arena_size, s_error_reporter);
+    s_interpreter = &static_interpreter;
+    if (s_interpreter->AllocateTensors() != kTfLiteOk) {
+        TF_LITE_REPORT_ERROR(s_error_reporter, "AllocateTensors failed");
+        return;
+    }
+    s_input = s_interpreter->input(0);
 }
 
 void loop() {
-    if (fd < 0 || rgb_buf == NULL) {
+    if (fd < 0 || rgb_buf == NULL || s_interpreter == nullptr || s_input == nullptr) {
         delay(1000);
         return;
     }
@@ -203,32 +299,28 @@ void loop() {
         last_time = now;
     }
 
-    struct v4l2_buffer buf_dq;
-    memset(&buf_dq, 0, sizeof(buf_dq));
-    buf_dq.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    buf_dq.memory = V4L2_MEMORY_MMAP;
-    if (ioctl(fd, VIDIOC_DQBUF, &buf_dq) == 0) {
-        frame_count++;
-        uint8_t *raw_data = (uint8_t *)mapped_bufs[buf_dq.index];
-        
-        if (now - last_frame_send >= FRAME_INTERVAL_US) {
-            demosaic_bggr_to_rgb(raw_data, rgb_buf, IMG_WIDTH, IMG_HEIGHT);
-            rgb_to_gray(rgb_buf, gray_buf, OUT_WIDTH * OUT_HEIGHT);
-
-            esp_log_level_t prev_level = esp_log_level_get("*");
-            esp_log_level_set("*", ESP_LOG_NONE);
-            
-            fwrite(syncHeader, 1, 3, stdout);
-            fwrite(gray_buf, 1, OUT_WIDTH * OUT_HEIGHT, stdout);
-            fflush(stdout);
-            
-            esp_log_level_set("*", prev_level);
-
-            last_frame_send = now;
-            sent_count++;
+    if (now - last_frame_send >= FRAME_INTERVAL_US) {
+        if (kTfLiteOk != GetImage(s_error_reporter, OUT_WIDTH, OUT_HEIGHT, 1, s_input->data.int8)) {
+            TF_LITE_REPORT_ERROR(s_error_reporter, "GetImage failed");
+        } else {
+            frame_count++;
+            if (kTfLiteOk != s_interpreter->Invoke()) {
+                TF_LITE_REPORT_ERROR(s_error_reporter, "Invoke failed");
+            } else {
+                TfLiteTensor* output = s_interpreter->output(0);
+                for (int i = 0; i < kCategoryCount; i++) {
+                    int score = 0;
+                    if (output->type == kTfLiteInt8) {
+                        score = (int)output->data.int8[i];
+                    } else if (output->type == kTfLiteUInt8) {
+                        score = (int)output->data.uint8[i];
+                    }
+                    ESP_LOGI(TAG, "%s : %d", kCategoryLabels[i], score);
+                }
+                sent_count++;
+            }
         }
-
-        ioctl(fd, VIDIOC_QBUF, &buf_dq);
+        last_frame_send = now;
     }
 
     delay(1);
