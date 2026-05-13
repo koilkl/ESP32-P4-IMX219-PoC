@@ -322,7 +322,9 @@ void loop() {
                     } else if (output->type == kTfLiteUInt8) {
                         score = (int)output->data.uint8[i];
                     }
-                    ESP_LOGI(TAG, "%s : %d", kCategoryLabels[i], score);
+                    // ESP_LOGI(TAG, "%s : %d", kCategoryLabels[i], score);
+                    float f = -(score-127.0f) / 255.0f;
+                    ESP_LOGI(TAG, "Confidence score for %s: %f", kCategoryLabels[i], f);
                 }
                 sent_count++;
             }
