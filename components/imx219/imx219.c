@@ -64,6 +64,52 @@ static esp_err_t imx219_read_reg(esp_cam_sensor_device_t *dev, uint16_t reg, uin
     return esp_sccb_transmit_receive_reg_a16v8(dev->sccb_handle, reg, val);
 }
 
+esp_err_t imx219_recover(esp_cam_sensor_device_t *dev, int stream_on) {
+    if (!dev) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_LOGW(TAG, "Attempting IMX219 recovery: standby -> soft reset -> reload registers -> %s",
+             stream_on ? "stream on" : "standby");
+
+    esp_err_t ret = imx219_write_reg(dev, 0x0100, 0x00);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to enter standby before recovery");
+        return ret;
+    }
+
+    ret = imx219_write_reg(dev, 0x0103, 0x01);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to trigger software reset");
+        return ret;
+    }
+    vTaskDelay(pdMS_TO_TICKS(5));
+
+    const esp_cam_sensor_format_t *format = dev->cur_format ? dev->cur_format : &imx219_format_1080p;
+    ret = imx219_set_format(dev, format);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to reload IMX219 default registers");
+        return ret;
+    }
+
+    ret = imx219_write_reg(dev, 0x0100, stream_on ? 0x01 : 0x00);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to restore stream state");
+        return ret;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(stream_on ? 100 : 5));
+
+    uint8_t stream_reg = 0;
+    if (imx219_read_reg(dev, 0x0100, &stream_reg) == ESP_OK) {
+        ESP_LOGI(TAG, "Recovery done, stream register=0x%02X", stream_reg);
+    } else {
+        ESP_LOGW(TAG, "Recovery done, but failed to read back stream register");
+    }
+
+    return ESP_OK;
+}
+
 // IOCTL for stream control
 static esp_err_t imx219_ioctl(esp_cam_sensor_device_t *dev, uint32_t cmd, void *arg) {
     int ret = ESP_OK;

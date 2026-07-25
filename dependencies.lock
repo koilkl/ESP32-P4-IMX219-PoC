@@ -30,7 +30,7 @@ dependencies:
       type: service
     version: 0.5.3
   espressif/dl_fft:
-    component_hash: 7dadbd644c0d7ba4733cc3726ec4cff6edf27b043725e1115861dec1609a3d28
+    component_hash: ced3cf28cc70452b7859c06f4e5059215167254a2047e34c893d6f501ccd6ea2
     dependencies:
     - name: idf
       require: private
@@ -38,7 +38,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com
       type: service
-    version: 0.3.1
+    version: 0.4.0
   espressif/eppp_link:
     component_hash: 04f7f31868b8ae6014c96132740a192d09611a6e46aaa7038c865ffc7e26b38f
     dependencies:
@@ -373,6 +373,6 @@ direct_dependencies:
 - espressif/network_provisioning
 - idf
 - joltwallet/littlefs
-manifest_hash: a4ac9fdf6ab9219c7c6095fd04934d885bb47420aecf69b2c59c96733f6e0e71
+manifest_hash: 90fc369e106edc7eb3994b73128abbcaae186f216a262ec9dced9b821c21cdde
 target: esp32p4
 version: 2.0.0

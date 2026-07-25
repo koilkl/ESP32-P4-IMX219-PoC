@@ -20,11 +20,11 @@
 
 static const char *TAG = "app_main";
 
-static const gpio_num_t I2C_MASTER_SCL_IO = GPIO_NUM_26;//8-26
-static const gpio_num_t I2C_MASTER_SDA_IO = GPIO_NUM_27;//7-27
+static const gpio_num_t I2C_MASTER_SCL_IO = GPIO_NUM_8;//8-26
+static const gpio_num_t I2C_MASTER_SDA_IO = GPIO_NUM_7;//7-27
 static const int I2C_MASTER_NUM = 0;
 static const int I2C_MASTER_FREQ_HZ = 100000;
-static const gpio_num_t XCLK_PIN = GPIO_NUM_20;
+static const gpio_num_t XCLK_PIN = GPIO_NUM_45;
 static constexpr uint32_t kXclkScanHz[] = {24000000, 19200000, 12000000, 6000000};
 static constexpr size_t kXclkScanIndex = 0;
 static_assert(kXclkScanIndex < (sizeof(kXclkScanHz) / sizeof(kXclkScanHz[0])), "kXclkScanIndex out of range");
@@ -134,6 +134,23 @@ static void enable_xclk(void) {
     cfg.esp_clock_router_cfg.xclk_freq_hz = active_xclk_hz();
     err = esp_cam_sensor_xclk_start(s_xclk_handle, &cfg);
     ESP_LOGI(TAG, "xclk_start: %s gpio=%d freq=%lu", esp_err_to_name(err), (int)XCLK_PIN, (unsigned long)active_xclk_hz());
+}
+
+static esp_err_t recover_imx219_if_needed(void) {
+    esp_cam_sensor_device_t *sensor = imx219_get_global_dev();
+    if (sensor == NULL) {
+        ESP_LOGE(TAG, "IMX219 device handle is NULL, cannot run recovery");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGW(TAG, "Running IMX219 recovery sequence before CSI streaming");
+    esp_err_t ret = imx219_recover(sensor, 0);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "IMX219 recovery failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    return ESP_OK;
 }
 
 static void init_demosaic_luts(int width, int height) {
@@ -348,6 +365,10 @@ void setup() {
     memset(&cam_config, 0, sizeof(cam_config));
     cam_config.csi = &csi_config;
     esp_video_init(&cam_config);
+
+    if (recover_imx219_if_needed() != ESP_OK) {
+        return;
+    }
 
     fd = open(ESP_VIDEO_MIPI_CSI_DEVICE_NAME, O_RDWR);
     if (fd < 0) {
