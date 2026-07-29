@@ -20,8 +20,8 @@
 
 static const char *TAG = "app_main";
 
-static const gpio_num_t I2C_MASTER_SCL_IO = GPIO_NUM_8;//8-26
-static const gpio_num_t I2C_MASTER_SDA_IO = GPIO_NUM_7;//7-27
+static const gpio_num_t I2C_MASTER_SCL_IO = GPIO_NUM_26;//8-26
+static const gpio_num_t I2C_MASTER_SDA_IO = GPIO_NUM_27;//7-27
 static const int I2C_MASTER_NUM = 0;
 static const int I2C_MASTER_FREQ_HZ = 100000;
 static const gpio_num_t XCLK_PIN = GPIO_NUM_45;
